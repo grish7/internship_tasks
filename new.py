@@ -1,300 +1,299 @@
-import  psycopg2
+import psycopg2
 import json 
 import sys
 import logging
+import os
+from queries import (
+                    ALL_QUERIES as queries,
+                    QUERIES_ROOMS as query_rooms,
+                    QUERIES_STUDENTS as query_students,
+                    QUERY_INSERT_ROOMS as query_insert_rooms,
+                    QUERY_INSERT_STUDENTS as query_insert_students,
+                    CREATE_INDEX_1 as create_index_1,
+                    CREATE_INDEX_2 as create_index_2
+                    )
 
-
-
-#============== step 1 ============
 
 class DatabaseConnection:
-    def __init__(self,dbname,user,password,host,port):
+    '''The DatabaseConnection with context manager support'''
+
+    def __init__(self, dbname: str, user: str, password: str, host: str, port: str)-> None:
         self.conn = None
         self.cursor = None
         self.config = {
-            'dbname' : dbname,
-            'user' : user,
-            'password': password,
-            'host': host,
-            'port': port
+            'dbname' :os.getenv(dbname, 'my_db'),
+            'user' : os.getenv(user,'postgres'),
+            'password': os.getenv(password, ''),
+            'host': os.getenv(host, 'localhost'),
+            'port': os.getenv(port, '5432')
         }
-        
     
-    def connect(self):
+    def __enter__(self):
+        '''Enter context manager and establish database connection'''
+        
+        self.connect()
+        logging.info('entering context manager')
+        
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb)-> bool:
+        '''Exit context manager and close connection'''
+        
+        if exc_type is not None:
+            logging.error(f"Error occurred: {exc_val}")
+            self.conn.rollback()
+        else:
+            self.conn.commit()
+
+        self.close()
+        
+        return False
+    
+    def connect(self)-> psycopg2.extensions.connection:
+        '''Establish database connection using stored configuration'''
+        
         try:
             self.conn = psycopg2.connect(**self.config)
-            logging.info("successfully")
+            logging.info("Database connection established")
             return self.conn
-        except Exception as e:
+        except psycopg2.OperationalError as e:
             logging.error(f"connection error: {e}")
-            return False
+            raise 
         
-    def close(self):
+    def close(self)-> None:
+        '''Close database cursor and connection'''
+        
         if self.cursor:
             self.cursor.close()
-            self.cursor = None
         if self.conn:
             self.conn.close()
-            self.conn = None
 
-    def commit(self):
+    def commit(self)-> None:
+        '''Commit current transaction to the database'''
+        
         self.conn.commit()
 
-    def get_cursor(self):
+    def get_cursor(self)-> psycopg2.extensions.cursor:
+        '''Create and return database cursor'''
+        
         self.cursor = self.conn.cursor()
         return self.cursor
-
-
-#================== step 2 ======================
     
-class TableCreator:
-    def __init__(self,cursor, conn):
-        self.cursor = cursor 
-        self.conn = conn
-        
-    query_rooms = ''' 
-        CREATE TABLE IF NOT EXISTS rooms(
-                id SERIAL PRIMARY KEY NOT NULL,
-                name VARCHAR(50)
-                )
-        '''
-    query_students = '''
-        CREATE TABLE IF NOT EXISTS students(
-                id SERIAL PRIMARY KEY NOT NULL,
-                name VARCHAR(50),
-                birthday DATE,
-                room INT REFERENCES rooms(id),
-                sex CHAR(1)
-                )
-        '''
-    def create_table(self):
-        try:
-            self.cursor.execute(self.query_rooms)
-            self.cursor.execute(self.query_students)
-            logging.info("Tables are created successfully")
-            self.conn.commit()
-            return True
-        except Exception as e:
-            logging.error(f"error: {e}")
-            self.conn.rollback()
-            return False
 
-# ========== step 3 ======= 
+class TableCreator:
+    '''Create tables in the database'''
+    
+    def __init__(self,cursor: psycopg2.extensions.cursor)-> None:
+        self.cursor = cursor 
+
+    def create_table(self)-> bool:
+        '''Create rooms and students tables in the database'''
+        
+        try:
+            self.cursor.execute(query_rooms)
+            self.cursor.execute(query_students)
+            logging.info("Tables created successfully")
+            return True
+        except psycopg2.Error as e:
+            logging.error(f"Error creating tables: {e}")
+            raise
 
 
 class DataInserter:
-    def __init__(self, cursor,conn):
+    '''Handles data insertion from JSON files into the database'''
+    
+    def __init__(self, cursor: psycopg2.extensions.cursor)-> None:
         self.cursor = cursor
-        self.conn = conn 
-
-    query_insert_rooms = '''
-        INSERT INTO rooms(id, name)
-        VALUES(%s, %s)    
-        ON CONFLICT (id) DO NOTHING
-    '''
-    query_insert_students = '''
-        INSERT INTO students(id, name, birthday, room, sex)
-        VALUES(%s, %s, %s, %s, %s) 
-        ON CONFLICT (id) DO NOTHING
-    '''
-
-    def get_data(self):
+    
+    @staticmethod
+    def get_data()-> list:
+        '''Load and parse JSON data from room and student files'''
+        
         rooms_file = sys.argv[1]
         students_file = sys.argv[2]
-        # output_format = sys.argv[3]
 
-        with open(rooms_file,"r", encoding= "utf-8") as file :
+        with open(rooms_file, "r", encoding= "utf-8") as file :
             data_rooms = json.load(file)
 
-        with open(students_file,"r", encoding= "utf-8") as file :
+        with open(students_file, "r", encoding= "utf-8") as file :
             data_students = json.load(file)
-
+        
         return data_rooms, data_students
 
-
-    def insert_data(self,data_rooms,data_students):
-        try:
-            for item in data_rooms:
-                self.cursor.execute(self.query_insert_rooms , (item['id'], item['name']))
-            for item in data_students:
-                self.cursor.execute(self.query_insert_students, (item['id'], item['name'], item['birthday'], item['room'], item['sex']))
-            logging.info("ok")
-            self.conn.commit()    
-            return True
-        except Exception as e:
-            logging.error(f"error: {e}")
-            self.conn.rollback()
-            return False
-
-# ========== step 4 ======= 
+    def insert_rooms(self, data_rooms: list[dict])-> bool:
+        '''Insert room records into the database '''
         
-class IndexCreator:
-    def __init__(self,cursor, conn):
-        self.cursor = cursor
-        self.conn = conn 
-
-    query_1 = '''
-        CREATE INDEX IF NOT EXISTS idx_students_room
-        ON students (room)
-        '''
-    
-    query_2 = '''
-        CREATE INDEX IF NOT EXISTS idx_students_birthday
-        ON students (birthday)
-        '''
-    
-    def create_index(self):
         try:
-            self.cursor.execute(self.query_1)
-            self.cursor.execute(self.query_2)
-            logging.info("ok")
-            self.conn.commit()
+            args = ((item['id'], item['name']) for item in data_rooms)
+            self.cursor.executemany(query_insert_rooms , args)
+            logging.info("Room data inserted successfully")
             return True
-        except Exception as e:
-            logging.error(f"error: {e}")
-            return False
+        except psycopg2.Error as e:
+            logging.error(f"Error inserting room: {e}")
+            raise
+        
+    def insert_students(self, data_students: list[dict])-> bool:
+        '''Insert student records into the database'''
+        
+        try:
+            args = ((item['id'], item['name'], item['birthday'], item['room'], item['sex']) for item in data_students)
+            self.cursor.executemany(query_insert_students, args)
+            logging.info("Student data inserted successfully")
+            return True
+        except psycopg2.Error as e:
+            logging.error(f"Error inserting students: {e}")
+            raise
+        
 
-# ========== step 5 ======= 
+class IndexCreator:
+    '''Creates database indexes'''
+    
+    def __init__(self,cursor: psycopg2.extensions.cursor)-> None:
+        self.cursor = cursor
+    
+    def create_index(self)-> bool:
+        try:
+            self.cursor.execute(create_index_1)
+            self.cursor.execute(create_index_2)
+            logging.info("Indexes created successfully")
+            return True
+        except psycopg2.Error as e:
+            logging.error(f"Error creating indexes: {e}")
+            raise
             
+
 class QueryExecutor:
-    def __init__(self, cursor, conn):
+    '''Executes analytical queries on the database'''
+    
+    def __init__(self, cursor: psycopg2.extensions.cursor)-> None:
+        '''Initialize QueryExecutor with database cursor and connection'''
+        
         self.cursor = cursor 
-        self.conn = conn 
 
-    queries = [
-        '''
-        SELECT 
-            r.name,
-            COUNT(s.id) as number_of_students
-        FROM rooms r
-        JOIN students s ON r.id =  s.room
-        GROUP BY r.id
-        ORDER BY number_of_students 
-        ''',
-
-        '''
-        SELECT 
-            room,
-            FLOOR( AVG(EXTRACT(YEAR FROM age(NOW(), birthday)))) as avg_age
-        FROM students
-        GROUP BY room
-        ORDER BY avg_age
-        LIMIT 5
-        ''',
-
-        '''
-        SELECT 
-            room,
-            EXTRACT(YEAR FROM AGE(MAX(birthday),MIN(birthday))) AS difference_age
-        FROM students
-        GROUP BY room
-        ORDER BY difference_age DESC
-        LIMIT 5
-        ''',
-
-        '''
-        SELECT 
-            room
-        FROM students
-        GROUP BY room
-        HAVING COUNT(DISTINCT sex) > 1
-        '''
-        ]
-
-    def execute_all_queries(self):
+    def execute_all_queries(self)-> list[list[tuple]]:
+        '''Execute all queries and collect resullt'''
+        
         try:
             result = []
-            for item in self.queries:
+            for item in queries:
                 self.cursor.execute(item)
+                description = self.cursor.description  
+                column_names = [col.name for col in description]
                 res = self.cursor.fetchall()
-                result.append(res)
-            logging.info("ok")
-            
-        except Exception as e:
-            logging.error(f"error 'query': {e}")
-            
-        return result 
+                result.append((column_names,res))
+            logging.info("Queries executed successfully")
+        except psycopg2.Error as e:
+            logging.error(f"Error executing queries: {e}")
+            raise
+        
+        return result
 
-
-
-# ========== step 6 ======= 
 
 class ResultTransformer:
-    def __init__(self,cursor, conn,result):
-        self.cursor = cursor
-        self.conn = conn 
+    '''Transform query results into structured dictionary format'''
+    
+    def __init__(self, result:list[tuple])-> None:
+        '''Initialize ResultTransformer with database and query results'''
+        
         self.result =result
         
-    
-    def transform(self, data,keys):
-        return [dict(zip(keys, row)) for row in data]
-    
-
-    def transform_all(self):
-        result_query_1 = self.transform(self.result[0], ['room_name', 'students_count'])
-        result_query_2 = self.transform(self.result[1], ['room_id', 'average_age of students'])
-        result_query_3 = self.transform(self.result[2], ['room_id', 'age difference'])
-        result_query_4 = self.transform(self.result[3], ['room_id'])
+    @staticmethod 
+    def transform(data: list[tuple], description: tuple)-> list[dict]:
+        '''Transform a list of tuples into a list of dictionaries'''
         
-        results ={
-            'query_1': result_query_1,
-            'query_2': result_query_2,
-            'query_3': result_query_3,
-            'query_4': result_query_4
-            }
-        return results
+        try:
+            if not data:
+                return []
+            else:
+                column_names = [item for item in description]
+                result_list = [dict(zip(column_names, row)) for row in data]
+                return result_list
+        except TypeError as e:
+            logging.error(f'Type error during transform: {e}')
+            raise
 
+    def transform_all(self, result_list:list)-> dict[list[dict]]:
+        '''Transform all query results into named dictionary structure'''
+        
+        try:
+            results ={}
+            for i in range(len(self.result)):
+                key = f'query_{i+1}'
+                results[key] = self.transform(self.result[i],result_list[i])
+            return results
+        except TypeError as e:
+            logging.error(f'Type Error during transform all results: {e}')
 
-# ========== step 7 ======= 
 
 class JsonSaver:
-    def __init__(self,cursor, conn):
-        self.cursor = cursor
-        self.conn = conn 
+    '''Saved transformed results to JSON file'''
+    
+    @staticmethod
+    def save_json_file(results: dict[list[dict]])-> bool:
+        '''Save transformed results to output.json file'''
 
-    def save_json_file(self,results):
         try:
             with open('output.json', 'w', encoding='utf-8' )as f:
                 json.dump(results, f, indent=2, default=str, ensure_ascii=False)
-            logging.info('results are saved')
+            logging.info('Results saved to output.json file')
             return True
-        except Exception as e:
-            logging.error(f'error: {e}')
-            return False
-        
-#================= step 8 ===============
+        except TypeError as e:
+            logging.error(f'Non-serializable data in results: {e}')
+            raise
 
-def main():
+
+def main()->None:
+    '''Main execution function'''
+
+    if len(sys.argv) < 3:
+        logging.error('Please provide both JSON files')
+        sys.exit()
+
     logging.basicConfig(level=logging.INFO)
 
-    db = DatabaseConnection("postgres","postgres","1234","localhost","5432")
-    db.connect()
-    cursor =db.get_cursor()
+    try:
+        with DatabaseConnection('DB_NAME','DB_USER', 'DB_PASSWORD', 'DB_HOST', 'DB_PORT') as db:
+            cursor =db.get_cursor()
 
-    table_creator = TableCreator(cursor, db.conn)
-    table_creator.create_table()
+            '''Create tables'''
+            table_creator = TableCreator(cursor)
+            table_creator.create_table()
 
-    data_inserter = DataInserter(cursor, db.conn)
-    data_rooms, data_students = data_inserter.get_data()
-    data_inserter.insert_data(data_rooms, data_students)
+            '''Insert data'''
 
-    index_creator = IndexCreator(cursor, db.conn)
-    index_creator.create_index()
+            data_inserter = DataInserter(cursor)
+            data_rooms, data_students = data_inserter.get_data()
+            data_inserter.insert_rooms(data_rooms)
+            data_inserter.insert_students(data_students)
 
-    query_executor = QueryExecutor(cursor, db.conn)
-    query_results = query_executor.execute_all_queries()
+            '''Create indexes'''
 
-    if query_results:
-        transformer = ResultTransformer(cursor, db.conn, query_results)
-        transformed_results = transformer.transform_all()
+            index_creator = IndexCreator(cursor)
+            index_creator.create_index()
 
-        json_saver = JsonSaver(cursor, db.conn)
-        json_saver.save_json_file(transformed_results)
+            '''Execute queries'''
 
-    db.close()
+            query_executor = QueryExecutor(cursor)
+            query_results = query_executor.execute_all_queries()
+
+            '''Transform results'''
+
+            if query_results:
+                data = [item[1] for item in query_results]
+                description = [item[0] for item in query_results]
+
+                transformer = ResultTransformer(data)
+                transformed_results = transformer.transform_all(description)
+
+                '''Save to JSON'''
+                
+                JsonSaver.save_json_file(transformed_results)
+
+    except psycopg2.OperationalError:
+        logging.info('Database connection error')
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit()
     main()
 
